@@ -7,194 +7,645 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from yahooquery import Ticker
 import warnings
-
-# Suppress unnecessary warnings
 warnings.filterwarnings('ignore')
 
-# ---------------------------------------------------------
-# 1. PAGE CONFIGURATION
-# ---------------------------------------------------------
+# Page configuration
 st.set_page_config(
-    page_title="Custom JSON Backtester",
-    page_icon="📊",
+    page_title="RayBot Signal Backtester",
+    page_icon="📈",
     layout="wide"
 )
 
-# ---------------------------------------------------------
-# 2. HELPER FUNCTIONS
-# ---------------------------------------------------------
+# Title and description
+st.title("📈 RayBot Trading Signal Backtester")
+st.markdown("""
+This tool backtests the RayBot Gold/XAUUSD trading signals using historical data from Yahoo Finance.
+Upload your JSON signal file or use the sample data to analyze performance.
+**All times are assumed to be GMT+3 (Middle East Time).**
+""")
 
-def parse_signal_date(date_str):
-    """
-    Parses date strings like 'January 19'. 
-    Defaults to the current year if year is missing.
-    """
-    current_year = datetime.now().year
-    formats = ["%B %d", "%Y-%m-%d", "%d-%m-%Y", "%m/%d/%Y"]
-    
-    date_str = str(date_str).strip()
-    for fmt in formats:
-        try:
-            dt = datetime.strptime(date_str, fmt)
-            # If the format didn't include a year, it defaults to 1900. 
-            # We fix that to the current year.
-            if dt.year == 1900:
-                dt = dt.replace(year=current_year)
-            return dt
-        except ValueError:
-            continue
-    return None
+# Initialize session state for data
+if 'signals_data' not in st.session_state:
+    st.session_state.signals_data = None
+if 'backtest_results' not in st.session_state:
+    st.session_state.backtest_results = None
+if 'price_data' not in st.session_state:
+    st.session_state.price_data = None
+if 'signals_df' not in st.session_state:
+    st.session_state.signals_df = None
+if 'dates_parsed' not in st.session_state:
+    st.session_state.dates_parsed = False
 
-def fetch_price_data(symbol, start_date, end_date):
-    """Fetch and sanitize YahooQuery data."""
+# Function to parse date strings with GMT+3 timezone
+def parse_signal_date(date_str, time_str=None, year=None):
+    """Parse date string with GMT+3 timezone assumption"""
     try:
-        start_buffer = start_date - timedelta(days=10)
-        end_buffer = end_date + timedelta(days=10)
+        # Use provided year or current year if not specified
+        if year is None:
+            current_year = datetime.now().year
+        else:
+            current_year = year
         
-        t = Ticker(symbol)
-        hist = t.history(start=start_buffer, end=end_buffer, interval='1d')
+        # Remove any emojis or special characters from date string
+        date_str_clean = date_str.strip()
         
-        if hist.empty or isinstance(hist, dict):
-            return None, f"No data found for {symbol}."
-        
-        hist = hist.reset_index()
-        hist.columns = [col.lower() for col in hist.columns]
-        
-        # Timezone stripping
-        hist['date'] = pd.to_datetime(hist['date'])
-        if hist['date'].dt.tz is not None:
-            hist['date'] = hist['date'].dt.tz_localize(None)
-            
-        return hist.sort_values('date').reset_index(drop=True), None
-    except Exception as e:
-        return None, f"Data Error: {str(e)}"
-
-def backtest_signals(df_prices, signals):
-    """
-    Backtests against specific JSON fields: 
-    direction, entry, stop_loss, take_profit
-    """
-    results = []
-    
-    for sig in signals:
-        try:
-            # Handle the specific signal structure
-            date_raw = sig.get('date')
-            sig_date = parse_signal_date(date_raw)
-            if not sig_date: continue
-            
-            direction = str(sig.get('direction', '')).upper()
-            target_entry = float(sig.get('entry', 0))
-            sl = float(sig.get('stop_loss', 0))
-            tp = float(sig.get('take_profit', 0))
-
-            # Find data for this date
-            day_data = df_prices[df_prices['date'] >= sig_date]
-            if day_data.empty: continue
-            
-            # Use actual market data for the exit (3 days later)
-            entry_idx = day_data.index[0]
-            exit_idx = min(entry_idx + 3, len(df_prices) - 1)
-            actual_exit_price = df_prices.loc[exit_idx, 'close']
-            
-            # PnL Calculation based on direction
-            if "BUY" in direction:
-                pnl = (actual_exit_price - target_entry) / target_entry
-            else:
-                pnl = (target_entry - actual_exit_price) / target_entry
-                
-            results.append({
-                'Date': sig_date.strftime('%Y-%m-%d'),
-                'Direction': direction,
-                'Signal Entry': target_entry,
-                'Market Exit': round(actual_exit_price, 2),
-                'PnL %': round(pnl * 100, 2),
-                'SL': sl,
-                'TP': tp
-            })
-        except Exception as e:
-            continue
-            
-    return pd.DataFrame(results)
-
-# ---------------------------------------------------------
-# 3. UI LAYOUT
-# ---------------------------------------------------------
-
-st.title("🏹 Advanced Signal Backtester")
-
-with st.sidebar:
-    st.header("Settings")
-    ticker = st.text_input("Ticker (YahooQuery)", value="GC=F")
-    
-    st.header("JSON Signal Tree")
-    # Using your provided structure as default
-    default_json = {
-        "signals": [
-            {"date": "January 19", "direction": "BUY", "entry": 4676.3, "stop_loss": 4582.77, "take_profit": 4933.5},
-            {"date": "January 20", "direction": "BUY", "entry": 4732.6, "stop_loss": 4673.44, "take_profit": 4969.23}
+        # Try different date formats
+        date_formats = [
+            '%B %d',  # January 19
+            '%b %d',   # Jan 19
+            '%d %B',   # 19 January
+            '%d %b'    # 19 Jan
         ]
-    }
-    json_input = st.text_area("Paste Full JSON Structure:", value=json.dumps(default_json, indent=2), height=400)
-    
-    run_btn = st.button("Run Full Analysis", type="primary", use_container_width=True)
-
-if run_btn:
-    try:
-        # 🔧 FIX: Access the 'signals' list within the dictionary
-        full_data = json.loads(json_input)
-        if isinstance(full_data, dict) and "signals" in full_data:
-            signal_list = full_data["signals"]
-        else:
-            signal_list = full_data if isinstance(full_data, list) else []
-
-        if not signal_list:
-            st.error("Could not find a list of signals. Check JSON structure.")
-            st.stop()
-
-        # Extract dates for range
-        parsed_dates = [parse_signal_date(s.get('date')) for s in signal_list]
-        parsed_dates = [d for d in parsed_dates if d]
         
-        with st.spinner("Fetching market data..."):
-            df, err = fetch_price_data(ticker, min(parsed_dates), max(parsed_dates))
+        parsed_date = None
+        date_part = None
+        
+        # First, parse the date part
+        for fmt in date_formats:
+            try:
+                # Parse without year first
+                date_part = datetime.strptime(date_str_clean, fmt)
+                # Add the year
+                date_part = date_part.replace(year=current_year)
+                break
+            except ValueError:
+                continue
+        
+        if date_part is None:
+            # Try with year in string
+            for fmt in ['%B %d %Y', '%b %d %Y', '%d %B %Y', '%d %b %Y']:
+                try:
+                    date_part = datetime.strptime(date_str_clean, fmt)
+                    break
+                except ValueError:
+                    continue
+        
+        if date_part is None:
+            # Last resort: try to extract month and day
+            import re
+            month_names = {
+                'january': 1, 'february': 2, 'march': 3, 'april': 4, 'may': 5, 'june': 6,
+                'july': 7, 'august': 8, 'september': 9, 'october': 10, 'november': 11, 'december': 12,
+                'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
+                'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12
+            }
             
-        if err:
-            st.error(err)
-        else:
-            results_df = backtest_signals(df, signal_list)
+            date_str_lower = date_str_clean.lower()
+            for month_name, month_num in month_names.items():
+                if month_name in date_str_lower:
+                    # Try to extract day
+                    day_match = re.search(r'(\d{1,2})', date_str_lower)
+                    if day_match:
+                        day = int(day_match.group(1))
+                        date_part = datetime(current_year, month_num, day)
+                        break
+        
+        if date_part is None:
+            return None, f"Could not parse date: {date_str}"
+        
+        # Now parse the time part
+        if time_str and isinstance(time_str, str) and time_str.strip():
+            time_str_clean = time_str.strip().upper()
             
-            if not results_df.empty:
-                # Stats
-                avg_pnl = results_df['PnL %'].mean()
-                st.metric("Total Cumulative PnL", f"{results_df['PnL %'].sum():.2f}%", delta=f"{avg_pnl:.2f}% Avg")
-                
-                # Table
-                st.subheader("Trade Outcome Report")
-                st.dataframe(results_df, use_container_width=True)
-                
-                # Chart
-                st.subheader("Visual Analysis")
-                fig = make_subplots(rows=1, cols=1)
-                fig.add_trace(go.Candlestick(
-                    x=df['date'], open=df['open'], high=df['high'], 
-                    low=df['low'], close=df['close'], name="Market"
-                ))
-                
-                # Plot Entries
-                fig.add_trace(go.Scatter(
-                    x=pd.to_datetime(results_df['Date']), 
-                    y=results_df['Signal Entry'],
-                    mode='markers', marker=dict(color='cyan', size=10, symbol='diamond'),
-                    name="Signal Entry"
-                ))
-                
-                fig.update_layout(template="plotly_dark", height=600, xaxis_rangeslider_visible=False)
-                st.plotly_chart(fig, use_container_width=True)
+            # Handle PM/AM format
+            if 'PM' in time_str_clean or 'AM' in time_str_clean:
+                try:
+                    # Remove any spaces and convert to proper format
+                    time_str_clean = time_str_clean.replace(' ', '')
+                    time_part = datetime.strptime(time_str_clean, '%I:%M%p').time()
+                except:
+                    try:
+                        time_part = datetime.strptime(time_str_clean, '%I%p').time()
+                    except:
+                        return None, f"Could not parse time: {time_str}"
             else:
-                st.warning("No matches found between signals and market data.")
-
-    except json.JSONDecodeError:
-        st.error("Invalid JSON. Please check your brackets and commas.")
+                # 24-hour format
+                try:
+                    time_part = datetime.strptime(time_str_clean, '%H:%M').time()
+                except:
+                    try:
+                        time_part = datetime.strptime(time_str_clean, '%H').time()
+                    except:
+                        return None, f"Could not parse time: {time_str}"
+            
+            # Combine date and time
+            parsed_date = datetime.combine(date_part.date(), time_part)
+        else:
+            # No time specified, use end of day (23:59) as default for GMT+3
+            parsed_date = datetime.combine(date_part.date(), datetime.strptime('23:59', '%H:%M').time())
+        
+        # Apply GMT+3 offset (add 3 hours)
+        parsed_date = parsed_date + timedelta(hours=3)
+        
+        return parsed_date, None
     except Exception as e:
-        st.error(f"Logic Error: {e}")
+        return None, f"Error parsing date: {date_str} {time_str} - {str(e)}"
+
+# Function to fetch price data
+def fetch_price_data(symbol, start_date, end_date):
+    """Fetch historical price data using yahooquery"""
+    try:
+        ticker = Ticker(symbol)
+        
+        # Fetch historical data
+        hist = ticker.history(start=start_date, end=end_date)
+        
+        if hist.empty:
+            st.error("No data returned from Yahoo Finance")
+            return None
+        
+        # Reset index to get Date as column
+        if isinstance(hist.index, pd.MultiIndex):
+            hist = hist.reset_index()
+        
+        # Ensure we have the right columns
+        required_cols = ['open', 'high', 'low', 'close', 'volume']
+        available_cols = [col for col in required_cols if col in hist.columns]
+        
+        if not available_cols:
+            st.error("No price data columns found")
+            return None
+        
+        # Convert date to datetime if it's not already
+        if 'date' in hist.columns:
+            hist['date'] = pd.to_datetime(hist['date'])
+        elif hist.index.name == 'date':
+            hist = hist.reset_index()
+            hist['date'] = pd.to_datetime(hist['date'])
+        
+        # Sort by date
+        hist = hist.sort_values('date').reset_index(drop=True)
+        
+        return hist
+    except Exception as e:
+        st.error(f"Error fetching price data: {e}")
+        return None
+
+# Function to backtest signals
+def backtest_signals(signals_df, price_data, max_days_held=30):
+    """Backtest trading signals against price data"""
+    results = []
+    unevaluated_signals = []
+    
+    for idx, signal in signals_df.iterrows():
+        signal_date = signal['parsed_date']
+        
+        if pd.isna(signal_date):
+            unevaluated_signals.append({
+                'signal_index': idx,
+                'reason': 'Invalid date',
+                'signal': signal.to_dict()
+            })
+            continue
+        
+        # Find price data starting from signal date
+        future_prices = price_data[price_data['date'] >= signal_date].copy()
+        
+        if future_prices.empty:
+            unevaluated_signals.append({
+                'signal_index': idx,
+                'reason': 'No price data after signal date',
+                'signal_date': signal_date,
+                'signal': signal.to_dict()
+            })
+            continue
+        
+        # Check if we have enough data to evaluate
+        if len(future_prices) <= 1:
+            unevaluated_signals.append({
+                'signal_index': idx,
+                'reason': 'Insufficient price data',
+                'signal_date': signal_date,
+                'signal': signal.to_dict()
+            })
+            continue
+        
+        # Get signal parameters
+        entry_price = signal['entry']
+        stop_loss = signal['stop_loss']
+        take_profit = signal['take_profit']
+        direction = signal['direction']
+        size_lots = signal['size_lots']
+        
+        exit_triggered = False
+        
+        # For BUY signals
+        if direction.upper() == 'BUY':
+            # Track price movements
+            max_high = float('-inf')
+            min_low = float('inf')
+            
+            for price_idx, price_row in future_prices.iterrows():
+                current_low = price_row['low']
+                current_high = price_row['high']
+                current_date = price_row['date']
+                
+                # Update min/max
+                min_low = min(min_low, current_low)
+                max_high = max(max_high, current_high)
+                
+                # Calculate days held
+                days_held = (current_date - signal_date).days
+                
+                # Check for stop loss hit
+                if current_low <= stop_loss:
+                    result = {
+                        'signal_index': idx,
+                        'signal_date': signal_date,
+                        'exit_date': current_date,
+                        'entry_price': entry_price,
+                        'exit_price': stop_loss,
+                        'stop_loss': stop_loss,
+                        'take_profit': take_profit,
+                        'direction': direction,
+                        'size_lots': size_lots,
+                        'result': 'STOP_LOSS',
+                        'pnl_percent': ((stop_loss - entry_price) / entry_price) * 100,
+                        'pnl_abs': (stop_loss - entry_price) * size_lots,
+                        'days_held': days_held,
+                        'exit_reason': 'Stop Loss Hit',
+                        'max_adverse_excursion': ((min_low - entry_price) / entry_price) * 100,
+                        'max_favorable_excursion': ((max_high - entry_price) / entry_price) * 100
+                    }
+                    results.append(result)
+                    exit_triggered = True
+                    break
+                
+                # Check for take profit hit
+                elif current_high >= take_profit:
+                    result = {
+                        'signal_index': idx,
+                        'signal_date': signal_date,
+                        'exit_date': current_date,
+                        'entry_price': entry_price,
+                        'exit_price': take_profit,
+                        'stop_loss': stop_loss,
+                        'take_profit': take_profit,
+                        'direction': direction,
+                        'size_lots': size_lots,
+                        'result': 'TAKE_PROFIT',
+                        'pnl_percent': ((take_profit - entry_price) / entry_price) * 100,
+                        'pnl_abs': (take_profit - entry_price) * size_lots,
+                        'days_held': days_held,
+                        'exit_reason': 'Take Profit Hit',
+                        'max_adverse_excursion': ((min_low - entry_price) / entry_price) * 100,
+                        'max_favorable_excursion': ((max_high - entry_price) / entry_price) * 100
+                    }
+                    results.append(result)
+                    exit_triggered = True
+                    break
+                
+                # Check for max days held
+                elif days_held >= max_days_held:
+                    # Use the close price on the max day
+                    exit_price = price_row['close']
+                    result = {
+                        'signal_index': idx,
+                        'signal_date': signal_date,
+                        'exit_date': current_date,
+                        'entry_price': entry_price,
+                        'exit_price': exit_price,
+                        'stop_loss': stop_loss,
+                        'take_profit': take_profit,
+                        'direction': direction,
+                        'size_lots': size_lots,
+                        'result': 'MAX_DAYS',
+                        'pnl_percent': ((exit_price - entry_price) / entry_price) * 100,
+                        'pnl_abs': (exit_price - entry_price) * size_lots,
+                        'days_held': days_held,
+                        'exit_reason': f'Max Days Held ({max_days_held})',
+                        'max_adverse_excursion': ((min_low - entry_price) / entry_price) * 100,
+                        'max_favorable_excursion': ((max_high - entry_price) / entry_price) * 100
+                    }
+                    results.append(result)
+                    exit_triggered = True
+                    break
+        
+        # If no exit was triggered by the end of available data
+        if not exit_triggered:
+            last_price_row = future_prices.iloc[-1]
+            last_close = last_price_row['close']
+            days_held = (last_price_row['date'] - signal_date).days
+            
+            # Calculate final min/max
+            final_min_low = future_prices['low'].min()
+            final_max_high = future_prices['high'].max()
+            
+            result = {
+                'signal_index': idx,
+                'signal_date': signal_date,
+                'exit_date': last_price_row['date'],
+                'entry_price': entry_price,
+                'exit_price': last_close,
+                'stop_loss': stop_loss,
+                'take_profit': take_profit,
+                'direction': direction,
+                'size_lots': size_lots,
+                'result': 'INCOMPLETE',
+                'pnl_percent': ((last_close - entry_price) / entry_price) * 100,
+                'pnl_abs': (last_close - entry_price) * size_lots,
+                'days_held': days_held,
+                'exit_reason': 'End of Data',
+                'max_adverse_excursion': ((final_min_low - entry_price) / entry_price) * 100,
+                'max_favorable_excursion': ((final_max_high - entry_price) / entry_price) * 100
+            }
+            results.append(result)
+    
+    return pd.DataFrame(results), unevaluated_signals
+
+# Sidebar for file upload
+st.sidebar.header("📁 Data Upload")
+uploaded_file = st.sidebar.file_uploader("Upload JSON signals file", type=['json'])
+
+if uploaded_file is not None:
+    try:
+        signals_data = json.load(uploaded_file)
+        st.session_state.signals_data = signals_data
+        st.session_state.dates_parsed = False
+        st.sidebar.success(f"✅ Loaded {len(signals_data.get('signals', []))} signals")
+    except Exception as e:
+        st.sidebar.error(f"Error loading file: {e}")
+else:
+    # Load sample data button
+    if st.sidebar.button("Load Sample Data"):
+        sample_data = {
+            "signals": [
+                {
+                    "date": "January 19",
+                    "time": "8:39 PM",
+                    "direction": "BUY",
+                    "level": "L2",
+                    "entry": 4676.3,
+                    "stop_loss": 4582.77,
+                    "take_profit": 4933.5,
+                    "size_lots": 2.45,
+                    "risk_percent": 2.3
+                },
+                {
+                    "date": "January 20",
+                    "time": "3:44 PM",
+                    "direction": "BUY",
+                    "level": "L3",
+                    "entry": 4732.6,
+                    "stop_loss": 4673.44,
+                    "take_profit": 4969.23,
+                    "size_lots": 3.72,
+                    "risk_percent": 2.21
+                }
+            ]
+        }
+        st.session_state.signals_data = sample_data
+        st.session_state.dates_parsed = False
+        st.sidebar.success(f"✅ Loaded {len(sample_data.get('signals', []))} sample signals")
+
+# Main content
+if st.session_state.signals_data:
+    signals = st.session_state.signals_data.get('signals', [])
+    
+    if signals:
+        # Convert to DataFrame
+        signals_df = pd.DataFrame(signals)
+        st.session_state.signals_df = signals_df
+        
+        # Display signals immediately
+        st.header("📋 Trading Signals")
+        st.dataframe(signals_df[['date', 'time', 'direction', 'entry', 'stop_loss', 
+                                'take_profit', 'size_lots', 'risk_percent']], 
+                    use_container_width=True)
+        
+        # Parse dates section
+        st.header("📅 Date Parsing Configuration")
+        
+        # Check for missing times
+        missing_times = signals_df[signals_df['time'].isna() | (signals_df['time'] == '') | (signals_df['time'].isnull())]
+        if not missing_times.empty:
+            st.warning(f"⚠️ {len(missing_times)} signals have missing time information.")
+            st.info("For signals with missing times, 11:59 PM GMT+3 will be used as default.")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Year selection
+            year_option = st.radio("Year for signals:", 
+                                  ["Current Year", "Specify Year"])
+            
+            if year_option == "Specify Year":
+                signal_year = st.number_input("Year for all signals", 
+                                            min_value=2000, 
+                                            max_value=datetime.now().year, 
+                                            value=datetime.now().year)
+            else:
+                signal_year = datetime.now().year
+        
+        with col2:
+            # Parse dates button
+            if st.button("🔍 Parse Dates with GMT+3", use_container_width=True):
+                with st.spinner("Parsing dates with GMT+3 timezone..."):
+                    parsed_dates = []
+                    errors = []
+                    
+                    for idx, row in signals_df.iterrows():
+                        # Use actual time if available, otherwise use default
+                        time_to_use = row['time'] if pd.notna(row['time']) and row['time'] != '' else "11:59 PM"
+                        parsed_date, error = parse_signal_date(row['date'], time_to_use, signal_year)
+                        
+                        if error:
+                            errors.append(f"Signal {idx}: {error}")
+                        
+                        parsed_dates.append(parsed_date)
+                    
+                    signals_df['parsed_date'] = parsed_dates
+                    st.session_state.signals_df = signals_df
+                    st.session_state.dates_parsed = True
+                    
+                    if errors:
+                        with st.expander("❌ Date Parsing Errors"):
+                            for error in errors:
+                                st.error(error)
+                        st.session_state.dates_parsed = False
+                    else:
+                        st.success("✅ All dates parsed successfully!")
+                        
+                        # Display parsed dates
+                        parsed_display = signals_df.copy()
+                        parsed_display['parsed_date_display'] = parsed_display['parsed_date'].dt.strftime('%Y-%m-%d %H:%M GMT+3')
+                        st.dataframe(parsed_display[['date', 'time', 'parsed_date_display', 'entry']], 
+                                    use_container_width=True)
+        
+        # Show backtest configuration if dates are parsed
+        if st.session_state.dates_parsed and 'parsed_date' in signals_df.columns:
+            st.header("⚙️ Backtest Configuration")
+            
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                symbol = st.selectbox(
+                    "Ticker Symbol",
+                    ["GC=F", "XAUUSD=X", "GLD"],
+                    help="Gold futures (GC=F), Gold spot (XAUUSD=X), or GLD ETF"
+                )
+            
+            with col2:
+                end_date = st.date_input(
+                    "End Date for Analysis",
+                    datetime.now().date()
+                )
+            
+            with col3:
+                max_days_held = st.number_input(
+                    "Max Days to Hold Position",
+                    min_value=1,
+                    max_value=365,
+                    value=30,
+                    help="Close position after this many days if no exit triggered"
+                )
+            
+            # Calculate date range
+            start_date = signals_df['parsed_date'].min().date() - timedelta(days=30)
+            
+            # The main backtest button - ALWAYS VISIBLE
+            st.markdown("---")
+            st.subheader("🚀 Run Backtest")
+            
+            # Display settings summary
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Symbol", symbol)
+            with col2:
+                st.metric("Date Range", f"{start_date} to {end_date}")
+            with col3:
+                st.metric("Max Days Held", max_days_held)
+            
+            # Run backtest button
+            if st.button("🚀 **Fetch Price Data and Run Backtest**", type="primary", use_container_width=True):
+                with st.spinner("Fetching historical data..."):
+                    # Fetch price data
+                    price_data = fetch_price_data(
+                        symbol, 
+                        start_date.strftime('%Y-%m-%d'), 
+                        end_date.strftime('%Y-%m-%d')
+                    )
+                    
+                    if price_data is not None:
+                        st.session_state.price_data = price_data
+                        
+                        # Display price data info
+                        st.success(f"✅ Fetched {len(price_data)} price records from {price_data['date'].min().date()} to {price_data['date'].max().date()}")
+                        
+                        # Run backtest
+                        with st.spinner("Running backtest..."):
+                            results_df, unevaluated = backtest_signals(signals_df, price_data, max_days_held)
+                            st.session_state.backtest_results = results_df
+                            
+                            st.success(f"✅ Backtest completed! {len(results_df)} signals evaluated")
+                            
+                            # Display results
+                            st.header("📊 Backtest Results")
+                            
+                            if not results_df.empty:
+                                total_signals = len(signals_df)
+                                evaluated_signals = len(results_df)
+                                
+                                # Count different result types
+                                result_counts = results_df['result'].value_counts()
+                                winning_trades = result_counts.get('TAKE_PROFIT', 0)
+                                losing_trades = result_counts.get('STOP_LOSS', 0)
+                                
+                                # Calculate win rate
+                                closed_trades = results_df[results_df['result'].isin(['TAKE_PROFIT', 'STOP_LOSS'])]
+                                if len(closed_trades) > 0:
+                                    win_rate = (len(closed_trades[closed_trades['result'] == 'TAKE_PROFIT']) / len(closed_trades)) * 100
+                                else:
+                                    win_rate = 0
+                                
+                                # Calculate P&L
+                                total_pnl = results_df['pnl_abs'].sum()
+                                avg_pnl = results_df['pnl_abs'].mean() if len(results_df) > 0 else 0
+                                
+                                # Calculate average days held
+                                if not closed_trades.empty:
+                                    avg_days_held = closed_trades['days_held'].mean()
+                                else:
+                                    avg_days_held = 0
+                                
+                                # Display metrics
+                                st.subheader("Performance Summary")
+                                
+                                row1_col1, row1_col2, row1_col3, row1_col4 = st.columns(4)
+                                row2_col1, row2_col2, row2_col3, row2_col4 = st.columns(4)
+                                
+                                with row1_col1:
+                                    st.metric("Total Signals", total_signals)
+                                
+                                with row1_col2:
+                                    st.metric("Evaluated Signals", evaluated_signals)
+                                
+                                with row1_col3:
+                                    st.metric("Winning Trades", winning_trades)
+                                
+                                with row1_col4:
+                                    st.metric("Losing Trades", losing_trades)
+                                
+                                with row2_col1:
+                                    st.metric("Win Rate", f"{win_rate:.1f}%")
+                                
+                                with row2_col2:
+                                    st.metric("Total P&L", f"${total_pnl:,.2f}")
+                                
+                                with row2_col3:
+                                    st.metric("Avg P&L per Trade", f"${avg_pnl:,.2f}")
+                                
+                                with row2_col4:
+                                    st.metric("Avg Days Held", f"{avg_days_held:.1f}")
+                                
+                                # Results table
+                                st.subheader("Detailed Results")
+                                results_display = results_df[[
+                                    'signal_index', 'signal_date', 'exit_date', 
+                                    'entry_price', 'exit_price', 'result', 'exit_reason',
+                                    'pnl_percent', 'pnl_abs', 'days_held'
+                                ]].copy()
+                                
+                                # Format dates for display
+                                results_display['signal_date'] = results_display['signal_date'].dt.strftime('%Y-%m-%d %H:%M')
+                                results_display['exit_date'] = results_display['exit_date'].dt.strftime('%Y-%m-%d %H:%M')
+                                
+                                results_display['pnl_percent'] = results_display['pnl_percent'].round(2)
+                                results_display['pnl_abs'] = results_display['pnl_abs'].round(2)
+                                
+                                st.dataframe(results_display, use_container_width=True)
+                                
+                                # Download results
+                                csv = results_df.to_csv(index=False)
+                                st.download_button(
+                                    label="📥 Download Results as CSV",
+                                    data=csv,
+                                    file_name="backtest_results.csv",
+                                    mime="text/csv"
+                                )
+                            else:
+                                st.warning("No signals were evaluated in the backtest period.")
+                    else:
+                        st.error("Failed to fetch price data. Please try again.")
+    else:
+        st.info("No signals found in the uploaded data.")
+else:
+    # Show instructions when no data is loaded
+    st.info("👈 Please upload a JSON file with trading signals in the sidebar to begin backtesting.")
+
+# Footer
+st.markdown("---")
+st.markdown("""
+**Note:** 
+1. All times are assumed to be GMT+3 (Middle East Time)
+2. Signals without time specified default to 11:59 PM GMT+3
+3. Positions close when: Stop Loss/Take Profit hit, Max Days Held reached, or end of data
+4. No slippage, commissions, or other trading costs are included
+""")
+
+# Add reset button in sidebar
+st.sidebar.markdown("---")
+if st.sidebar.button("🔄 Reset All Data"):
+    for key in list(st.session_state.keys()):
+        del st.session_state[key]
+    st.rerun()
