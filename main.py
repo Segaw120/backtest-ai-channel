@@ -33,6 +33,9 @@ if 'backtest_results' not in st.session_state:
     st.session_state.backtest_results = None
 if 'price_data' not in st.session_state:
     st.session_state.price_data = None
+# NEW: Track which file is currently loaded to prevent overwrite on rerun
+if 'loaded_file_id' not in st.session_state:
+    st.session_state.loaded_file_id = None
 
 # Function to parse date strings with GMT+3 timezone
 def parse_signal_date(date_str, time_str=None, year=None):
@@ -361,27 +364,35 @@ sample_data = {
     ]
 }
 
+# --- FIXED SIDEBAR LOGIC ---
 if uploaded_file is not None:
-    try:
-        signals_data = json.load(uploaded_file)
-        signals_list = signals_data.get('signals', [])
-        
-        if signals_list:
-            signals_df = pd.DataFrame(signals_list)
-            st.session_state.signals_df = signals_df
-            st.session_state.dates_parsed = False
-            st.session_state.backtest_results = None
-            st.sidebar.success(f"✅ Loaded {len(signals_list)} signals")
-        else:
-            st.sidebar.error("No signals found in the JSON file")
-    except Exception as e:
-        st.sidebar.error(f"Error loading file: {str(e)}")
+    # We use the file.size or name as a simple ID to detect change
+    file_id = f"{uploaded_file.name}_{uploaded_file.size}"
+    
+    # Only process if this is a NEW file we haven't loaded yet
+    if st.session_state.loaded_file_id != file_id:
+        try:
+            signals_data = json.load(uploaded_file)
+            signals_list = signals_data.get('signals', [])
+            
+            if signals_list:
+                signals_df = pd.DataFrame(signals_list)
+                st.session_state.signals_df = signals_df
+                st.session_state.dates_parsed = False
+                st.session_state.backtest_results = None
+                st.session_state.loaded_file_id = file_id  # Mark as loaded
+                st.sidebar.success(f"✅ Loaded {len(signals_list)} signals")
+            else:
+                st.sidebar.error("No signals found in the JSON file")
+        except Exception as e:
+            st.sidebar.error(f"Error loading file: {str(e)}")
 
 if st.sidebar.button("📋 Load Sample Data"):
     signals_df = pd.DataFrame(sample_data['signals'])
     st.session_state.signals_df = signals_df
     st.session_state.dates_parsed = False
     st.session_state.backtest_results = None
+    st.session_state.loaded_file_id = "sample_data" # Set ID to prevent upload overwrite
     st.sidebar.success(f"✅ Loaded {len(signals_df)} sample signals")
     st.rerun()
 
@@ -401,9 +412,10 @@ if st.session_state.signals_df is not None:
     signals_df = st.session_state.signals_df
     
     st.header("📋 Step 1: Review Your Signals")
+    # FIX: Replaced use_container_width with width='stretch'
     st.dataframe(
         signals_df[['date', 'time', 'direction', 'entry', 'stop_loss', 'take_profit', 'size_lots']],
-        use_container_width=True
+        width='stretch'
     )
     
     # Check for missing times
@@ -438,6 +450,7 @@ if st.session_state.signals_df is not None:
     with col2:
         st.markdown("### ")
         st.markdown("### ")
+        # The button logic here is fine now because the sidebar won't reset state on rerun
         if st.button("🔍 Parse All Dates", type="primary", use_container_width=True):
             with st.spinner("Parsing dates with GMT+3 timezone..."):
                 parsed_dates = []
@@ -475,9 +488,10 @@ if st.session_state.signals_df is not None:
         display_df = signals_df.copy()
         display_df['Parsed DateTime (GMT+3)'] = display_df['parsed_date'].dt.strftime('%Y-%m-%d %I:%M %p')
         
+        # FIX: Replaced use_container_width with width='stretch'
         st.dataframe(
             display_df[['date', 'time', 'Parsed DateTime (GMT+3)', 'entry', 'direction']],
-            use_container_width=True
+            width='stretch'
         )
         
         st.markdown("---")
@@ -602,12 +616,13 @@ if st.session_state.signals_df is not None:
         display_results['pnl_percent'] = display_results['pnl_percent'].round(2)
         display_results['pnl_abs'] = display_results['pnl_abs'].round(2)
         
+        # FIX: Replaced use_container_width with width='stretch'
         st.dataframe(
             display_results[[
                 'signal_index', 'signal_date', 'exit_date', 'entry_price', 'exit_price',
                 'result', 'pnl_percent', 'pnl_abs', 'days_held', 'exit_reason'
             ]],
-            use_container_width=True,
+            width='stretch',
             height=400
         )
         
