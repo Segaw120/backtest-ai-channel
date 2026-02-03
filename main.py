@@ -417,45 +417,44 @@ if st.session_state.signals_data:
                     st.error("Failed to parse some dates:")
                     for error in errors:
                         st.error(error)
-                    return
-                
-                # Add parsed dates to dataframe
-                signals_df['parsed_date'] = parsed_dates
-                st.session_state.signals_df = signals_df
-                
-                # Step 2: Calculate date range and fetch price data
-                start_date = signals_df['parsed_date'].min().date() - timedelta(days=30)
-                
-                # Display parsed dates
-                st.success("✅ Dates parsed successfully!")
-                parsed_display = signals_df.copy()
-                parsed_display['parsed_date_display'] = parsed_display['parsed_date'].dt.strftime('%Y-%m-%d %H:%M GMT+3')
-                st.dataframe(parsed_display[['date', 'time', 'parsed_date_display', 'entry']], height=200)
-                
-                # Fetch price data
-                price_data = fetch_price_data(
-                    symbol, 
-                    start_date.strftime('%Y-%m-%d'), 
-                    end_date.strftime('%Y-%m-%d')
-                )
-                
-                if price_data is not None:
-                    st.session_state.price_data = price_data
+                else:
+                    # Add parsed dates to dataframe
+                    signals_df['parsed_date'] = parsed_dates
+                    st.session_state.signals_df = signals_df
                     
-                    # Step 3: Run backtest
-                    results_df, unevaluated = backtest_signals(signals_df, price_data, max_days_held)
-                    st.session_state.backtest_results = results_df
+                    # Step 2: Calculate date range and fetch price data
+                    start_date = signals_df['parsed_date'].min().date() - timedelta(days=30)
                     
-                    # Store configuration
-                    st.session_state.backtest_config = {
-                        'symbol': symbol,
-                        'start_date': start_date,
-                        'end_date': end_date,
-                        'max_days_held': max_days_held,
-                        'signal_year': signal_year
-                    }
+                    # Display parsed dates
+                    st.success("✅ Dates parsed successfully!")
+                    parsed_display = signals_df.copy()
+                    parsed_display['parsed_date_display'] = parsed_display['parsed_date'].dt.strftime('%Y-%m-%d %H:%M GMT+3')
+                    st.dataframe(parsed_display[['date', 'time', 'parsed_date_display', 'entry']], height=200)
                     
-                    st.success(f"✅ Backtest completed! {len(results_df)} signals evaluated")
+                    # Fetch price data
+                    price_data = fetch_price_data(
+                        symbol, 
+                        start_date.strftime('%Y-%m-%d'), 
+                        end_date.strftime('%Y-%m-%d')
+                    )
+                    
+                    if price_data is not None:
+                        st.session_state.price_data = price_data
+                        
+                        # Step 3: Run backtest
+                        results_df, unevaluated = backtest_signals(signals_df, price_data, max_days_held)
+                        st.session_state.backtest_results = results_df
+                        
+                        # Store configuration
+                        st.session_state.backtest_config = {
+                            'symbol': symbol,
+                            'start_date': start_date,
+                            'end_date': end_date,
+                            'max_days_held': max_days_held,
+                            'signal_year': signal_year
+                        }
+                        
+                        st.success(f"✅ Backtest completed! {len(results_df)} signals evaluated")
         
         # Display backtest results if available
         if st.session_state.backtest_results is not None:
