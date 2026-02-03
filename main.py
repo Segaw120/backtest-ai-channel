@@ -418,8 +418,7 @@ if st.session_state.signals_data:
         # Section 1: Display signals
         st.header("📋 Trading Signals")
         st.dataframe(signals_df[['date', 'time', 'direction', 'entry', 'stop_loss', 
-                                'take_profit', 'size_lots', 'risk_percent']], 
-                    use_container_width=True)
+                                'take_profit', 'size_lots', 'risk_percent']])
         
         # Section 2: Date parsing (always show this section)
         st.header("📅 Date Parsing Configuration")
@@ -447,8 +446,8 @@ if st.session_state.signals_data:
                 signal_year = datetime.now().year
         
         with col2:
-            # Parse dates button
-            if st.button("🔍 Parse Dates with GMT+3", use_container_width=True, key="parse_dates"):
+            # Parse dates button - FIXED: Using correct width parameter
+            if st.button("🔍 Parse Dates with GMT+3", key="parse_dates"):
                 with st.spinner("Parsing dates with GMT+3 timezone..."):
                     parsed_dates = []
                     errors = []
@@ -472,17 +471,23 @@ if st.session_state.signals_data:
                             for error in errors:
                                 st.error(error)
                         st.session_state.dates_parsed = False
+                        st.error("Failed to parse some dates. Please check the errors above.")
                     else:
                         st.success("✅ All dates parsed successfully!")
-                        st.rerun()
+                        # Store in session state to show immediately
+                        st.session_state.parsed_dates_display = signals_df.copy()
+                        st.session_state.parsed_dates_display['parsed_date_display'] = st.session_state.parsed_dates_display['parsed_date'].dt.strftime('%Y-%m-%d %H:%M GMT+3')
         
         # If dates are parsed, show the parsed dates
         if st.session_state.dates_parsed and 'parsed_date' in signals_df.columns:
             st.subheader("✅ Parsed Dates (GMT+3)")
-            parsed_display = signals_df.copy()
-            parsed_display['parsed_date_display'] = parsed_display['parsed_date'].dt.strftime('%Y-%m-%d %H:%M GMT+3')
-            st.dataframe(parsed_display[['date', 'time', 'parsed_date_display', 'entry']], 
-                        use_container_width=True, height=200)
+            if hasattr(st.session_state, 'parsed_dates_display'):
+                parsed_display = st.session_state.parsed_dates_display
+            else:
+                parsed_display = signals_df.copy()
+                parsed_display['parsed_date_display'] = parsed_display['parsed_date'].dt.strftime('%Y-%m-%d %H:%M GMT+3')
+            
+            st.dataframe(parsed_display[['date', 'time', 'parsed_date_display', 'entry']], height=200)
         
         # Section 3: Backtest configuration (ALWAYS SHOW IF DATES ARE PARSED)
         if st.session_state.dates_parsed and 'parsed_date' in signals_df.columns:
@@ -532,7 +537,7 @@ if st.session_state.signals_data:
                 st.metric("Max Days Held", max_days_held)
             
             # Run backtest button - ALWAYS VISIBLE
-            if st.button("🚀 **Fetch Price Data and Run Backtest**", type="primary", use_container_width=True, key="run_backtest"):
+            if st.button("🚀 **Fetch Price Data and Run Backtest**", type="primary", key="run_backtest"):
                 with st.spinner("Fetching historical data..."):
                     # Fetch price data
                     price_data = fetch_price_data(
@@ -558,9 +563,6 @@ if st.session_state.signals_data:
                             st.session_state.current_max_days = max_days_held
                             
                             st.success(f"✅ Backtest completed! {len(results_df)} signals evaluated")
-                            st.rerun()
-                    else:
-                        st.error("Failed to fetch price data. Please try again.")
         
         # Section 5: Backtest results (ONLY SHOW IF BACKTEST WAS RUN)
         if st.session_state.show_results and st.session_state.backtest_results is not None:
@@ -639,7 +641,7 @@ if st.session_state.signals_data:
                 results_display['pnl_percent'] = results_display['pnl_percent'].round(2)
                 results_display['pnl_abs'] = results_display['pnl_abs'].round(2)
                 
-                st.dataframe(results_display, use_container_width=True)
+                st.dataframe(results_display)
                 
                 # Visualizations
                 st.subheader("📈 Visualization")
@@ -735,10 +737,9 @@ if st.session_state.signals_data:
                 
                 # Button to run another backtest
                 st.markdown("---")
-                if st.button("🔄 Run Another Backtest with Different Settings", use_container_width=True):
+                if st.button("🔄 Run Another Backtest with Different Settings"):
                     st.session_state.show_results = False
                     st.session_state.backtest_results = None
-                    st.rerun()
             else:
                 st.warning("No signals were evaluated in the backtest period.")
     else:
@@ -762,7 +763,7 @@ st.sidebar.markdown("---")
 if st.sidebar.button("🔄 Reset All Data"):
     for key in list(st.session_state.keys()):
         del st.session_state[key]
-    st.rerun()
+    st.experimental_rerun()
 
 # Add CSS for better styling
 st.markdown("""
