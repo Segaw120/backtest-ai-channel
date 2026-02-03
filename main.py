@@ -4,7 +4,6 @@ import numpy as np
 import json
 from datetime import datetime, timedelta
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 from yahooquery import Ticker
 import warnings
 warnings.filterwarnings('ignore')
@@ -20,11 +19,10 @@ st.set_page_config(
 st.title("📈 RayBot Trading Signal Backtester")
 st.markdown("""
 This tool backtests the RayBot Gold/XAUUSD trading signals using historical data from Yahoo Finance.
-Upload your JSON signal file or use the sample data to analyze performance.
 **All times are assumed to be GMT+3 (Middle East Time).**
 """)
 
-# Initialize session state for data
+# Initialize session state
 if 'signals_data' not in st.session_state:
     st.session_state.signals_data = None
 if 'backtest_results' not in st.session_state:
@@ -33,12 +31,8 @@ if 'price_data' not in st.session_state:
     st.session_state.price_data = None
 if 'signals_df' not in st.session_state:
     st.session_state.signals_df = None
-if 'dates_parsed' not in st.session_state:
-    st.session_state.dates_parsed = False
-if 'backtest_run' not in st.session_state:
-    st.session_state.backtest_run = False
-if 'show_results' not in st.session_state:
-    st.session_state.show_results = False
+if 'backtest_config' not in st.session_state:
+    st.session_state.backtest_config = {}
 
 # Function to parse date strings with GMT+3 timezone
 def parse_signal_date(date_str, time_str=None, year=None):
@@ -50,7 +44,7 @@ def parse_signal_date(date_str, time_str=None, year=None):
         else:
             current_year = year
         
-        # Remove any emojis or special characters from date string
+        # Clean date string
         date_str_clean = date_str.strip()
         
         # Try different date formats
@@ -64,12 +58,10 @@ def parse_signal_date(date_str, time_str=None, year=None):
         parsed_date = None
         date_part = None
         
-        # First, parse the date part
+        # Parse date part
         for fmt in date_formats:
             try:
-                # Parse without year first
                 date_part = datetime.strptime(date_str_clean, fmt)
-                # Add the year
                 date_part = date_part.replace(year=current_year)
                 break
             except ValueError:
@@ -85,36 +77,15 @@ def parse_signal_date(date_str, time_str=None, year=None):
                     continue
         
         if date_part is None:
-            # Last resort: try to extract month and day
-            import re
-            month_names = {
-                'january': 1, 'february': 2, 'march': 3, 'april': 4, 'may': 5, 'june': 6,
-                'july': 7, 'august': 8, 'september': 9, 'october': 10, 'november': 11, 'december': 12,
-                'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
-                'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12
-            }
-            
-            date_str_lower = date_str_clean.lower()
-            for month_name, month_num in month_names.items():
-                if month_name in date_str_lower:
-                    # Try to extract day
-                    day_match = re.search(r'(\d{1,2})', date_str_lower)
-                    if day_match:
-                        day = int(day_match.group(1))
-                        date_part = datetime(current_year, month_num, day)
-                        break
-        
-        if date_part is None:
             return None, f"Could not parse date: {date_str}"
         
-        # Now parse the time part
+        # Parse time part
         if time_str and isinstance(time_str, str) and time_str.strip():
             time_str_clean = time_str.strip().upper()
             
             # Handle PM/AM format
             if 'PM' in time_str_clean or 'AM' in time_str_clean:
                 try:
-                    # Remove any spaces and convert to proper format
                     time_str_clean = time_str_clean.replace(' ', '')
                     time_part = datetime.strptime(time_str_clean, '%I:%M%p').time()
                 except:
@@ -135,7 +106,7 @@ def parse_signal_date(date_str, time_str=None, year=None):
             # Combine date and time
             parsed_date = datetime.combine(date_part.date(), time_part)
         else:
-            # No time specified, use end of day (23:59) as default for GMT+3
+            # No time specified, use end of day (23:59) as default
             parsed_date = datetime.combine(date_part.date(), datetime.strptime('23:59', '%H:%M').time())
         
         # Apply GMT+3 offset (add 3 hours)
@@ -150,8 +121,6 @@ def fetch_price_data(symbol, start_date, end_date):
     """Fetch historical price data using yahooquery"""
     try:
         ticker = Ticker(symbol)
-        
-        # Fetch historical data
         hist = ticker.history(start=start_date, end=end_date)
         
         if hist.empty:
@@ -162,15 +131,7 @@ def fetch_price_data(symbol, start_date, end_date):
         if isinstance(hist.index, pd.MultiIndex):
             hist = hist.reset_index()
         
-        # Ensure we have the right columns
-        required_cols = ['open', 'high', 'low', 'close', 'volume']
-        available_cols = [col for col in required_cols if col in hist.columns]
-        
-        if not available_cols:
-            st.error("No price data columns found")
-            return None
-        
-        # Convert date to datetime if it's not already
+        # Convert date to datetime
         if 'date' in hist.columns:
             hist['date'] = pd.to_datetime(hist['date'])
         elif hist.index.name == 'date':
@@ -214,7 +175,6 @@ def backtest_signals(signals_df, price_data, max_days_held=30):
             })
             continue
         
-        # Check if we have enough data to evaluate
         if len(future_prices) <= 1:
             unevaluated_signals.append({
                 'signal_index': idx,
@@ -365,48 +325,15 @@ if uploaded_file is not None:
     try:
         signals_data = json.load(uploaded_file)
         st.session_state.signals_data = signals_data
-        st.session_state.dates_parsed = False
-        st.session_state.backtest_run = False
-        st.session_state.show_results = False
+        # Clear previous results when new file is uploaded
+        st.session_state.backtest_results = None
+        st.session_state.price_data = None
+        st.session_state.backtest_config = {}
         st.sidebar.success(f"✅ Loaded {len(signals_data.get('signals', []))} signals")
     except Exception as e:
         st.sidebar.error(f"Error loading file: {e}")
-else:
-    # Load sample data button
-    if st.sidebar.button("Load Sample Data"):
-        sample_data = {
-            "signals": [
-                {
-                    "date": "January 19",
-                    "time": "8:39 PM",
-                    "direction": "BUY",
-                    "level": "L2",
-                    "entry": 4676.3,
-                    "stop_loss": 4582.77,
-                    "take_profit": 4933.5,
-                    "size_lots": 2.45,
-                    "risk_percent": 2.3
-                },
-                {
-                    "date": "January 20",
-                    "time": "3:44 PM",
-                    "direction": "BUY",
-                    "level": "L3",
-                    "entry": 4732.6,
-                    "stop_loss": 4673.44,
-                    "take_profit": 4969.23,
-                    "size_lots": 3.72,
-                    "risk_percent": 2.21
-                }
-            ]
-        }
-        st.session_state.signals_data = sample_data
-        st.session_state.dates_parsed = False
-        st.session_state.backtest_run = False
-        st.session_state.show_results = False
-        st.sidebar.success(f"✅ Loaded {len(sample_data.get('signals', []))} sample signals")
 
-# Main content - ALWAYS SHOW THESE SECTIONS
+# Main content
 if st.session_state.signals_data:
     signals = st.session_state.signals_data.get('signals', [])
     
@@ -415,13 +342,13 @@ if st.session_state.signals_data:
         signals_df = pd.DataFrame(signals)
         st.session_state.signals_df = signals_df
         
-        # Section 1: Display signals
+        # Display signals
         st.header("📋 Trading Signals")
         st.dataframe(signals_df[['date', 'time', 'direction', 'entry', 'stop_loss', 
                                 'take_profit', 'size_lots', 'risk_percent']])
         
-        # Section 2: Date parsing (always show this section)
-        st.header("📅 Date Parsing Configuration")
+        # Combined Date Parsing and Backtest Configuration
+        st.header("⚙️ Backtest Configuration")
         
         # Check for missing times
         missing_times = signals_df[signals_df['time'].isna() | (signals_df['time'] == '') | (signals_df['time'].isnull())]
@@ -429,143 +356,109 @@ if st.session_state.signals_data:
             st.warning(f"⚠️ {len(missing_times)} signals have missing time information.")
             st.info("For signals with missing times, 11:59 PM GMT+3 will be used as default.")
         
-        col1, col2 = st.columns(2)
+        # Configuration in columns
+        col1, col2, col3 = st.columns(3)
         
         with col1:
             # Year selection
             year_option = st.radio("Year for signals:", 
-                                  ["Current Year", "Specify Year"], key="year_option")
+                                  ["Current Year", "Specify Year"])
             
             if year_option == "Specify Year":
                 signal_year = st.number_input("Year for all signals", 
                                             min_value=2000, 
                                             max_value=datetime.now().year, 
-                                            value=datetime.now().year,
-                                            key="signal_year")
+                                            value=datetime.now().year)
             else:
                 signal_year = datetime.now().year
         
         with col2:
-            # Parse dates button - FIXED: Using correct width parameter
-            if st.button("🔍 Parse Dates with GMT+3", key="parse_dates"):
-                with st.spinner("Parsing dates with GMT+3 timezone..."):
-                    parsed_dates = []
-                    errors = []
-                    
-                    for idx, row in signals_df.iterrows():
-                        # Use actual time if available, otherwise use default
-                        time_to_use = row['time'] if pd.notna(row['time']) and row['time'] != '' else "11:59 PM"
-                        parsed_date, error = parse_signal_date(row['date'], time_to_use, signal_year)
-                        
-                        if error:
-                            errors.append(f"Signal {idx}: {error}")
-                        
-                        parsed_dates.append(parsed_date)
-                    
-                    signals_df['parsed_date'] = parsed_dates
-                    st.session_state.signals_df = signals_df
-                    st.session_state.dates_parsed = True
-                    
-                    if errors:
-                        with st.expander("❌ Date Parsing Errors"):
-                            for error in errors:
-                                st.error(error)
-                        st.session_state.dates_parsed = False
-                        st.error("Failed to parse some dates. Please check the errors above.")
-                    else:
-                        st.success("✅ All dates parsed successfully!")
-                        # Store in session state to show immediately
-                        st.session_state.parsed_dates_display = signals_df.copy()
-                        st.session_state.parsed_dates_display['parsed_date_display'] = st.session_state.parsed_dates_display['parsed_date'].dt.strftime('%Y-%m-%d %H:%M GMT+3')
+            symbol = st.selectbox(
+                "Ticker Symbol",
+                ["GC=F", "XAUUSD=X", "GLD"],
+                help="Gold futures (GC=F), Gold spot (XAUUSD=X), or GLD ETF"
+            )
+            
+            end_date = st.date_input(
+                "End Date for Analysis",
+                datetime.now().date()
+            )
         
-        # If dates are parsed, show the parsed dates
-        if st.session_state.dates_parsed and 'parsed_date' in signals_df.columns:
-            st.subheader("✅ Parsed Dates (GMT+3)")
-            if hasattr(st.session_state, 'parsed_dates_display'):
-                parsed_display = st.session_state.parsed_dates_display
-            else:
+        with col3:
+            max_days_held = st.number_input(
+                "Max Days to Hold Position",
+                min_value=1,
+                max_value=365,
+                value=30,
+                help="Close position after this many days if no exit triggered"
+            )
+        
+        # Main backtest button
+        st.markdown("---")
+        st.subheader("🚀 Run Backtest")
+        
+        if st.button("🚀 **Parse Dates & Run Backtest**", type="primary", use_container_width=True):
+            with st.spinner("Parsing dates and running backtest..."):
+                # Step 1: Parse dates
+                parsed_dates = []
+                errors = []
+                
+                for idx, row in signals_df.iterrows():
+                    # Use actual time if available, otherwise use default
+                    time_to_use = row['time'] if pd.notna(row['time']) and row['time'] != '' else "11:59 PM"
+                    parsed_date, error = parse_signal_date(row['date'], time_to_use, signal_year)
+                    
+                    if error:
+                        errors.append(f"Signal {idx}: {error}")
+                    
+                    parsed_dates.append(parsed_date)
+                
+                if errors:
+                    st.error("Failed to parse some dates:")
+                    for error in errors:
+                        st.error(error)
+                    return
+                
+                # Add parsed dates to dataframe
+                signals_df['parsed_date'] = parsed_dates
+                st.session_state.signals_df = signals_df
+                
+                # Step 2: Calculate date range and fetch price data
+                start_date = signals_df['parsed_date'].min().date() - timedelta(days=30)
+                
+                # Display parsed dates
+                st.success("✅ Dates parsed successfully!")
                 parsed_display = signals_df.copy()
                 parsed_display['parsed_date_display'] = parsed_display['parsed_date'].dt.strftime('%Y-%m-%d %H:%M GMT+3')
-            
-            st.dataframe(parsed_display[['date', 'time', 'parsed_date_display', 'entry']], height=200)
-        
-        # Section 3: Backtest configuration (ALWAYS SHOW IF DATES ARE PARSED)
-        if st.session_state.dates_parsed and 'parsed_date' in signals_df.columns:
-            st.header("⚙️ Backtest Configuration")
-            
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                symbol = st.selectbox(
-                    "Ticker Symbol",
-                    ["GC=F", "XAUUSD=X", "GLD"],
-                    help="Gold futures (GC=F), Gold spot (XAUUSD=X), or GLD ETF",
-                    key="symbol"
+                st.dataframe(parsed_display[['date', 'time', 'parsed_date_display', 'entry']], height=200)
+                
+                # Fetch price data
+                price_data = fetch_price_data(
+                    symbol, 
+                    start_date.strftime('%Y-%m-%d'), 
+                    end_date.strftime('%Y-%m-%d')
                 )
-            
-            with col2:
-                end_date = st.date_input(
-                    "End Date for Analysis",
-                    datetime.now().date(),
-                    key="end_date"
-                )
-            
-            with col3:
-                max_days_held = st.number_input(
-                    "Max Days to Hold Position",
-                    min_value=1,
-                    max_value=365,
-                    value=30,
-                    help="Close position after this many days if no exit triggered",
-                    key="max_days_held"
-                )
-            
-            # Calculate date range
-            start_date = signals_df['parsed_date'].min().date() - timedelta(days=30)
-            
-            # Section 4: The main backtest button (ALWAYS SHOW)
-            st.markdown("---")
-            st.subheader("🚀 Run Backtest")
-            
-            # Display settings summary
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Symbol", symbol)
-            with col2:
-                st.metric("Date Range", f"{start_date} to {end_date}")
-            with col3:
-                st.metric("Max Days Held", max_days_held)
-            
-            # Run backtest button - ALWAYS VISIBLE
-            if st.button("🚀 **Fetch Price Data and Run Backtest**", type="primary", key="run_backtest"):
-                with st.spinner("Fetching historical data..."):
-                    # Fetch price data
-                    price_data = fetch_price_data(
-                        symbol, 
-                        start_date.strftime('%Y-%m-%d'), 
-                        end_date.strftime('%Y-%m-%d')
-                    )
+                
+                if price_data is not None:
+                    st.session_state.price_data = price_data
                     
-                    if price_data is not None:
-                        st.session_state.price_data = price_data
-                        
-                        # Run backtest
-                        with st.spinner("Running backtest..."):
-                            results_df, unevaluated = backtest_signals(signals_df, price_data, max_days_held)
-                            st.session_state.backtest_results = results_df
-                            st.session_state.backtest_run = True
-                            st.session_state.show_results = True
-                            
-                            # Store the current configuration
-                            st.session_state.current_symbol = symbol
-                            st.session_state.current_start_date = start_date
-                            st.session_state.current_end_date = end_date
-                            st.session_state.current_max_days = max_days_held
-                            
-                            st.success(f"✅ Backtest completed! {len(results_df)} signals evaluated")
+                    # Step 3: Run backtest
+                    results_df, unevaluated = backtest_signals(signals_df, price_data, max_days_held)
+                    st.session_state.backtest_results = results_df
+                    
+                    # Store configuration
+                    st.session_state.backtest_config = {
+                        'symbol': symbol,
+                        'start_date': start_date,
+                        'end_date': end_date,
+                        'max_days_held': max_days_held,
+                        'signal_year': signal_year
+                    }
+                    
+                    st.success(f"✅ Backtest completed! {len(results_df)} signals evaluated")
         
-        # Section 5: Backtest results (ONLY SHOW IF BACKTEST WAS RUN)
-        if st.session_state.show_results and st.session_state.backtest_results is not None:
+        # Display backtest results if available
+        if st.session_state.backtest_results is not None:
             st.header("📊 Backtest Results")
             
             results_df = st.session_state.backtest_results
@@ -578,6 +471,8 @@ if st.session_state.signals_data:
                 result_counts = results_df['result'].value_counts()
                 winning_trades = result_counts.get('TAKE_PROFIT', 0)
                 losing_trades = result_counts.get('STOP_LOSS', 0)
+                max_days_trades = result_counts.get('MAX_DAYS', 0)
+                incomplete_trades = result_counts.get('INCOMPLETE', 0)
                 
                 # Calculate win rate
                 closed_trades = results_df[results_df['result'].isin(['TAKE_PROFIT', 'STOP_LOSS'])]
@@ -599,31 +494,25 @@ if st.session_state.signals_data:
                 # Display metrics
                 st.subheader("Performance Summary")
                 
-                row1_col1, row1_col2, row1_col3, row1_col4 = st.columns(4)
-                row2_col1, row2_col2, row2_col3, row2_col4 = st.columns(4)
+                # Create metrics grid
+                col1, col2, col3, col4 = st.columns(4)
+                col5, col6, col7, col8 = st.columns(4)
                 
-                with row1_col1:
+                with col1:
                     st.metric("Total Signals", total_signals)
-                
-                with row1_col2:
+                with col2:
                     st.metric("Evaluated Signals", evaluated_signals)
-                
-                with row1_col3:
+                with col3:
                     st.metric("Winning Trades", winning_trades)
-                
-                with row1_col4:
+                with col4:
                     st.metric("Losing Trades", losing_trades)
-                
-                with row2_col1:
+                with col5:
                     st.metric("Win Rate", f"{win_rate:.1f}%")
-                
-                with row2_col2:
+                with col6:
                     st.metric("Total P&L", f"${total_pnl:,.2f}")
-                
-                with row2_col3:
+                with col7:
                     st.metric("Avg P&L per Trade", f"${avg_pnl:,.2f}")
-                
-                with row2_col4:
+                with col8:
                     st.metric("Avg Days Held", f"{avg_days_held:.1f}")
                 
                 # Results table
@@ -737,9 +626,10 @@ if st.session_state.signals_data:
                 
                 # Button to run another backtest
                 st.markdown("---")
-                if st.button("🔄 Run Another Backtest with Different Settings"):
-                    st.session_state.show_results = False
+                if st.button("🔄 Run Another Backtest"):
                     st.session_state.backtest_results = None
+                    st.session_state.price_data = None
+                    st.rerun()
             else:
                 st.warning("No signals were evaluated in the backtest period.")
     else:
@@ -763,22 +653,4 @@ st.sidebar.markdown("---")
 if st.sidebar.button("🔄 Reset All Data"):
     for key in list(st.session_state.keys()):
         del st.session_state[key]
-    st.experimental_rerun()
-
-# Add CSS for better styling
-st.markdown("""
-<style>
-    .stDataFrame {
-        font-size: 14px;
-    }
-    div[data-testid="stMetric"] {
-        background-color: #f0f2f6;
-        padding: 15px;
-        border-radius: 10px;
-        margin: 5px;
-    }
-    .stButton > button {
-        width: 100%;
-    }
-</style>
-""", unsafe_allow_html=True)
+    st.rerun()
