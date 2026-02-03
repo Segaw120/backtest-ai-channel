@@ -169,17 +169,39 @@ def fetch_price_data(symbol, start_date, end_date):
 def backtest_signals(signals_df, price_data):
     """Backtest trading signals against price data"""
     results = []
+    unevaluated_signals = []
     
     for idx, signal in signals_df.iterrows():
         signal_date = signal['parsed_date']
         
         if pd.isna(signal_date):
+            unevaluated_signals.append({
+                'signal_index': idx,
+                'reason': 'Invalid date',
+                'signal': signal
+            })
             continue
         
         # Find price data starting from signal date
         future_prices = price_data[price_data['date'] >= signal_date].copy()
         
         if future_prices.empty:
+            unevaluated_signals.append({
+                'signal_index': idx,
+                'reason': 'No price data after signal date',
+                'signal_date': signal_date,
+                'signal': signal
+            })
+            continue
+        
+        # Check if we have enough data to evaluate (at least 1 day after signal)
+        if len(future_prices) <= 1:
+            unevaluated_signals.append({
+                'signal_index': idx,
+                'reason': 'Insufficient price data',
+                'signal_date': signal_date,
+                'signal': signal
+            })
             continue
         
         # Get entry price from signal
@@ -189,10 +211,12 @@ def backtest_signals(signals_df, price_data):
         direction = signal['direction']
         size_lots = signal['size_lots']
         
+        exit_triggered = False
+        
         # For BUY signals
         if direction.upper() == 'BUY':
             # Check for stop loss or take profit hit
-            for _, price_row in future_prices.iterrows():
+            for price_idx, price_row in future_prices.iterrows():
                 current_low = price_row['low']
                 current_high = price_row['high']
                 
@@ -211,9 +235,13 @@ def backtest_signals(signals_df, price_data):
                         'result': 'STOP_LOSS',
                         'pnl_percent': ((stop_loss - entry_price) / entry_price) * 100,
                         'pnl_abs': (stop_loss - entry_price) * size_lots,
-                        'days_held': (price_row['date'] - signal_date).days
+                        'days_held': (price_row['date'] - signal_date).days,
+                        'exit_reason': 'Stop Loss',
+                        'max_adverse_excursion': ((current_low - entry_price) / entry_price) * 100,
+                        'max_favorable_excursion': ((current_high - entry_price) / entry_price) * 100
                     }
                     results.append(result)
+                    exit_triggered = True
                     break
                 
                 # Check if take profit was hit
@@ -231,16 +259,42 @@ def backtest_signals(signals_df, price_data):
                         'result': 'TAKE_PROFIT',
                         'pnl_percent': ((take_profit - entry_price) / entry_price) * 100,
                         'pnl_abs': (take_profit - entry_price) * size_lots,
-                        'days_held': (price_row['date'] - signal_date).days
+                        'days_held': (price_row['date'] - signal_date).days,
+                        'exit_reason': 'Take Profit',
+                        'max_adverse_excursion': ((current_low - entry_price) / entry_price) * 100,
+                        'max_favorable_excursion': ((current_high - entry_price) / entry_price) * 100
                     }
                     results.append(result)
+                    exit_triggered = True
                     break
         
-        # Add SELL signal handling if needed
-        # elif direction.upper() == 'SELL':
-        #     ... similar logic for short positions
+        # If no exit was triggered by the end of available data
+        if not exit_triggered:
+            last_price_row = future_prices.iloc[-1]
+            last_close = last_price_row['close']
+            
+            # Calculate P&L based on last available close
+            result = {
+                'signal_index': idx,
+                'signal_date': signal_date,
+                'exit_date': last_price_row['date'],
+                'entry_price': entry_price,
+                'exit_price': last_close,
+                'stop_loss': stop_loss,
+                'take_profit': take_profit,
+                'direction': direction,
+                'size_lots': size_lots,
+                'result': 'OPEN',
+                'pnl_percent': ((last_close - entry_price) / entry_price) * 100,
+                'pnl_abs': (last_close - entry_price) * size_lots,
+                'days_held': (last_price_row['date'] - signal_date).days,
+                'exit_reason': 'Still Open',
+                'max_adverse_excursion': ((future_prices['low'].min() - entry_price) / entry_price) * 100,
+                'max_favorable_excursion': ((future_prices['high'].max() - entry_price) / entry_price) * 100
+            }
+            results.append(result)
     
-    return pd.DataFrame(results)
+    return pd.DataFrame(results), unevaluated_signals
 
 # Main content area
 if st.session_state.signals_data:
@@ -264,7 +318,7 @@ if st.session_state.signals_data:
         # Backtest configuration
         st.header("⚙️ Backtest Configuration")
         
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
         
         with col1:
             symbol = st.selectbox(
@@ -277,6 +331,15 @@ if st.session_state.signals_data:
             end_date = st.date_input(
                 "End Date for Analysis",
                 datetime.now().date()
+            )
+        
+        with col3:
+            max_days_held = st.number_input(
+                "Max Days to Hold Position",
+                min_value=1,
+                max_value=365,
+                value=30,
+                help="Close position after this many days if no exit triggered"
             )
         
         # Calculate date range for data fetching
@@ -298,7 +361,7 @@ if st.session_state.signals_data:
                         
                         # Run backtest
                         with st.spinner("Running backtest..."):
-                            results_df = backtest_signals(signals_df, price_data)
+                            results_df, unevaluated = backtest_signals(signals_df, price_data)
                             st.session_state.backtest_results = results_df
                             
                             st.success(f"✅ Backtest completed! {len(results_df)} signals evaluated")
@@ -312,35 +375,63 @@ if st.session_state.signals_data:
                                 evaluated_signals = len(results_df)
                                 winning_trades = len(results_df[results_df['result'] == 'TAKE_PROFIT'])
                                 losing_trades = len(results_df[results_df['result'] == 'STOP_LOSS'])
+                                open_trades = len(results_df[results_df['result'] == 'OPEN'])
                                 
-                                win_rate = (winning_trades / evaluated_signals * 100) if evaluated_signals > 0 else 0
-                                total_pnl = results_df['pnl_abs'].sum()
-                                avg_pnl = results_df['pnl_abs'].mean()
-                                avg_days_held = results_df['days_held'].mean()
+                                win_rate = (winning_trades / (winning_trades + losing_trades) * 100) if (winning_trades + losing_trades) > 0 else 0
                                 
-                                col1, col2, col3, col4 = st.columns(4)
+                                # Calculate P&L for closed trades only
+                                closed_trades = results_df[results_df['result'] != 'OPEN']
+                                if not closed_trades.empty:
+                                    total_pnl = closed_trades['pnl_abs'].sum()
+                                    avg_pnl = closed_trades['pnl_abs'].mean()
+                                    avg_days_held = closed_trades['days_held'].mean()
+                                else:
+                                    total_pnl = 0
+                                    avg_pnl = 0
+                                    avg_days_held = 0
                                 
-                                with col1:
+                                # Display metrics in a grid
+                                st.subheader("Performance Summary")
+                                
+                                # Create 2 rows of metrics
+                                row1_col1, row1_col2, row1_col3, row1_col4 = st.columns(4)
+                                row2_col1, row2_col2, row2_col3, row2_col4 = st.columns(4)
+                                
+                                with row1_col1:
                                     st.metric("Total Signals", total_signals)
+                                
+                                with row1_col2:
                                     st.metric("Evaluated Signals", evaluated_signals)
                                 
-                                with col2:
-                                    st.metric("Win Rate", f"{win_rate:.1f}%")
+                                with row1_col3:
                                     st.metric("Winning Trades", winning_trades)
                                 
-                                with col3:
+                                with row1_col4:
                                     st.metric("Losing Trades", losing_trades)
-                                    st.metric("Avg Days Held", f"{avg_days_held:.1f}")
                                 
-                                with col4:
+                                with row2_col1:
+                                    st.metric("Open Trades", open_trades)
+                                
+                                with row2_col2:
+                                    st.metric("Win Rate", f"{win_rate:.1f}%")
+                                
+                                with row2_col3:
                                     st.metric("Total P&L", f"${total_pnl:,.2f}")
+                                
+                                with row2_col4:
                                     st.metric("Avg P&L per Trade", f"${avg_pnl:,.2f}")
+                                
+                                # Show unevaluated signals if any
+                                if unevaluated:
+                                    with st.expander(f"⚠️ {len(unevaluated)} Unevaluated Signals"):
+                                        for uneval in unevaluated:
+                                            st.write(f"Signal {uneval['signal_index']}: {uneval['reason']}")
                                 
                                 # Results table
                                 st.subheader("Detailed Results")
                                 results_display = results_df[[
                                     'signal_index', 'signal_date', 'exit_date', 
-                                    'entry_price', 'exit_price', 'result',
+                                    'entry_price', 'exit_price', 'result', 'exit_reason',
                                     'pnl_percent', 'pnl_abs', 'days_held'
                                 ]].copy()
                                 
@@ -353,11 +444,18 @@ if st.session_state.signals_data:
                                 st.subheader("📈 Visualization")
                                 
                                 # Create tabs for different charts
-                                tab1, tab2, tab3 = st.tabs(["P&L Distribution", "Cumulative P&L", "Trade Duration"])
+                                tab1, tab2, tab3, tab4 = st.tabs(["P&L Distribution", "Cumulative P&L", "Trade Duration", "Win/Loss Analysis"])
                                 
                                 with tab1:
                                     fig1 = go.Figure()
-                                    colors = ['green' if x > 0 else 'red' for x in results_df['pnl_abs']]
+                                    colors = []
+                                    for result in results_df['result']:
+                                        if result == 'TAKE_PROFIT':
+                                            colors.append('green')
+                                        elif result == 'STOP_LOSS':
+                                            colors.append('red')
+                                        else:
+                                            colors.append('gray')
                                     
                                     fig1.add_trace(go.Bar(
                                         x=results_df['signal_index'],
@@ -418,6 +516,23 @@ if st.session_state.signals_data:
                                     )
                                     st.plotly_chart(fig3, use_container_width=True)
                                 
+                                with tab4:
+                                    # Win/Loss analysis
+                                    win_loss_counts = results_df['result'].value_counts()
+                                    
+                                    fig4 = go.Figure(data=[go.Pie(
+                                        labels=win_loss_counts.index,
+                                        values=win_loss_counts.values,
+                                        hole=.3,
+                                        marker_colors=['green', 'red', 'gray']
+                                    )])
+                                    
+                                    fig4.update_layout(
+                                        title='Trade Outcome Distribution',
+                                        height=400
+                                    )
+                                    st.plotly_chart(fig4, use_container_width=True)
+                                
                                 # Download results
                                 csv = results_df.to_csv(index=False)
                                 st.download_button(
@@ -477,7 +592,7 @@ st.markdown("""
 1. All signals are executed at the specified entry price
 2. Stop loss and take profit are executed at exact price levels
 3. No slippage, commissions, or other trading costs are included
-4. All positions are closed when either stop loss or take profit is hit
+4. Positions close when either stop loss or take profit is hit, or after max holding period
 """)
 
 # Add some CSS for better styling
@@ -487,6 +602,12 @@ st.markdown("""
         font-size: 14px;
     }
     .metric-container {
+        background-color: #f0f2f6;
+        padding: 15px;
+        border-radius: 10px;
+        margin: 5px;
+    }
+    div[data-testid="stMetric"] {
         background-color: #f0f2f6;
         padding: 15px;
         border-radius: 10px;
