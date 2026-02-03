@@ -31,6 +31,10 @@ if 'backtest_results' not in st.session_state:
     st.session_state.backtest_results = None
 if 'price_data' not in st.session_state:
     st.session_state.price_data = None
+if 'signals_df' not in st.session_state:
+    st.session_state.signals_df = None
+if 'filled_times' not in st.session_state:
+    st.session_state.filled_times = {}
 
 # Function to load sample data
 def load_sample_data():
@@ -406,123 +410,211 @@ if st.session_state.signals_data:
     if signals:
         # Convert to DataFrame
         signals_df = pd.DataFrame(signals)
+        st.session_state.signals_df = signals_df
         
         # Check for missing times
         missing_times = signals_df[signals_df['time'].isna() | (signals_df['time'] == '')]
         
+        # Display signals
+        st.header("📋 Trading Signals")
+        
+        # Show warning for missing times
         if not missing_times.empty:
             st.warning(f"⚠️ {len(missing_times)} signals have missing time information.")
             
-            with st.expander("View signals with missing times"):
-                for idx, row in missing_times.iterrows():
-                    st.write(f"**Signal {idx}**: {row['date']} - Entry: {row['entry']}")
+            st.subheader("⏰ Fill Missing Times for Specific Signals")
+            st.markdown("""
+            Please enter the time for each signal below (GMT+3 timezone).
+            Format examples: `8:39 PM`, `14:30`, `3:44 PM`
+            """)
             
-            # Ask user for default time for missing times
-            st.subheader("⏰ Time Input for Missing Signals")
+            # Create a form for time input
+            with st.form("time_input_form"):
+                st.markdown("### Enter Times for Signals with Missing Time")
+                
+                # Create columns for better layout
+                col1, col2, col3 = st.columns(3)
+                
+                time_inputs = {}
+                for idx, row in missing_times.iterrows():
+                    signal_info = f"**Signal {idx}** - {row['date']} - Entry: {row['entry']}"
+                    
+                    # Distribute across columns
+                    if idx % 3 == 0:
+                        with col1:
+                            time_inputs[idx] = st.text_input(
+                                signal_info,
+                                value=st.session_state.filled_times.get(idx, ""),
+                                key=f"time_{idx}",
+                                placeholder="e.g., 8:39 PM"
+                            )
+                    elif idx % 3 == 1:
+                        with col2:
+                            time_inputs[idx] = st.text_input(
+                                signal_info,
+                                value=st.session_state.filled_times.get(idx, ""),
+                                key=f"time_{idx}",
+                                placeholder="e.g., 8:39 PM"
+                            )
+                    else:
+                        with col3:
+                            time_inputs[idx] = st.text_input(
+                                signal_info,
+                                value=st.session_state.filled_times.get(idx, ""),
+                                key=f"time_{idx}",
+                                placeholder="e.g., 8:39 PM"
+                            )
+                
+                # Submit button for time inputs
+                col1, col2, col3 = st.columns([1, 2, 1])
+                with col2:
+                    submit_times = st.form_submit_button("✅ Save All Times")
+                
+                if submit_times:
+                    # Validate and save times
+                    valid_times = True
+                    for idx, time_input in time_inputs.items():
+                        if not time_input:
+                            st.error(f"Time for Signal {idx} is empty! Please enter a time.")
+                            valid_times = False
+                            break
+                        
+                        # Validate time format
+                        try:
+                            # Test if time can be parsed
+                            test_time = time_input.upper()
+                            if 'PM' in test_time or 'AM' in test_time:
+                                # Try 12-hour format
+                                test_time = test_time.replace(' ', '')
+                                datetime.strptime(test_time, '%I:%M%p').time()
+                            else:
+                                # Try 24-hour format
+                                datetime.strptime(test_time, '%H:%M').time()
+                            
+                            # Save to session state
+                            st.session_state.filled_times[idx] = time_input
+                        except ValueError:
+                            st.error(f"Invalid time format for Signal {idx}: '{time_input}'. Use format like '8:39 PM' or '14:30'")
+                            valid_times = False
+                    
+                    if valid_times:
+                        st.success("✅ All times saved successfully!")
+                        
+                        # Update the signals DataFrame with filled times
+                        for idx, time_value in st.session_state.filled_times.items():
+                            if idx < len(signals_df):
+                                signals_df.at[idx, 'time'] = time_value
+                        
+                        st.session_state.signals_df = signals_df
+                        st.rerun()
+            
+            # Show current status
+            with st.expander("📊 Current Time Filling Status"):
+                st.write(f"**Total signals:** {len(signals_df)}")
+                st.write(f"**Signals with time:** {len(signals_df) - len(missing_times)}")
+                st.write(f"**Signals missing time:** {len(missing_times)}")
+                st.write(f"**Times filled:** {len(st.session_state.filled_times)}")
+                
+                if st.session_state.filled_times:
+                    st.write("**Filled times:**")
+                    for idx, time_val in st.session_state.filled_times.items():
+                        st.write(f"  - Signal {idx}: {time_val}")
+        
+        # Display signals table
+        st.subheader("Signal Overview")
+        
+        display_df = signals_df.copy()
+        if 'time' in display_df.columns:
+            # Mark which times were filled
+            display_df['time_source'] = display_df.apply(
+                lambda x: "✅ Original" if pd.notna(x['time']) and x.name not in st.session_state.filled_times 
+                else "✅ Filled" if x.name in st.session_state.filled_times 
+                else "❌ Missing", 
+                axis=1
+            )
+        
+        st.dataframe(display_df[['date', 'time', 'time_source', 'direction', 'entry', 
+                                'stop_loss', 'take_profit', 'size_lots', 'risk_percent']], 
+                    use_container_width=True)
+        
+        # Only proceed with date parsing if all times are filled or we have original times
+        if missing_times.empty or len(st.session_state.filled_times) == len(missing_times):
+            st.header("📅 Date Parsing Configuration")
+            
             col1, col2 = st.columns(2)
             
             with col1:
-                default_hour = st.selectbox("Default hour for missing times", 
-                                          list(range(24)), index=9)
+                # Let user specify the year if needed
+                year_option = st.radio("Year for signals:", 
+                                      ["Current Year", "Specify Year"])
+                
+                if year_option == "Specify Year":
+                    signal_year = st.number_input("Year for all signals", 
+                                                min_value=2000, 
+                                                max_value=datetime.now().year, 
+                                                value=datetime.now().year)
+                else:
+                    signal_year = datetime.now().year
             
             with col2:
-                default_minute = st.selectbox("Default minute for missing times", 
-                                            [0, 15, 30, 45], index=0)
+                # Parse dates button
+                parse_dates = st.button("🔍 Parse Dates with GMT+3")
             
-            # Apply default time to missing entries
-            default_time_str = f"{default_hour:02d}:{default_minute:02d}"
-            apply_default = st.checkbox(f"Apply default time ({default_time_str}) to all missing signals")
-        
-        # Parse dates with user interaction
-        st.header("📅 Date Parsing Configuration")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            # Let user specify the year if needed
-            year_option = st.radio("Year for signals:", 
-                                  ["Current Year", "Specify Year"])
-            
-            if year_option == "Specify Year":
-                signal_year = st.number_input("Year for all signals", 
-                                            min_value=2000, 
-                                            max_value=datetime.now().year, 
-                                            value=datetime.now().year)
-            else:
-                signal_year = datetime.now().year
-        
-        with col2:
-            # Parse dates button
-            parse_dates = st.button("🔍 Parse Dates with GMT+3")
-        
-        if parse_dates:
-            with st.spinner("Parsing dates with GMT+3 timezone..."):
-                parsed_dates = []
-                errors = []
-                
-                for idx, row in signals_df.iterrows():
-                    # Use default time if missing and user chose to apply it
-                    time_to_use = row['time']
-                    if pd.isna(time_to_use) or time_to_use == '':
-                        if 'apply_default' in locals() and apply_default:
-                            time_to_use = default_time_str
+            if parse_dates:
+                with st.spinner("Parsing dates with GMT+3 timezone..."):
+                    parsed_dates = []
+                    errors = []
                     
-                    parsed_date, error = parse_signal_date(row['date'], time_to_use, signal_year)
+                    for idx, row in signals_df.iterrows():
+                        parsed_date, error = parse_signal_date(row['date'], row['time'], signal_year)
+                        
+                        if error:
+                            errors.append(f"Signal {idx}: {error}")
+                        
+                        parsed_dates.append(parsed_date)
                     
-                    if error:
-                        errors.append(f"Signal {idx}: {error}")
+                    signals_df['parsed_date'] = parsed_dates
+                    st.session_state.signals_df = signals_df
                     
-                    parsed_dates.append(parsed_date)
-                
-                signals_df['parsed_date'] = parsed_dates
-                
-                if errors:
-                    with st.expander("❌ Date Parsing Errors"):
-                        for error in errors:
-                            st.error(error)
-                else:
-                    st.success("✅ All dates parsed successfully!")
+                    if errors:
+                        with st.expander("❌ Date Parsing Errors"):
+                            for error in errors:
+                                st.error(error)
+                    else:
+                        st.success("✅ All dates parsed successfully!")
+                        st.rerun()
+        else:
+            st.info("👆 Please fill all missing times above before proceeding to date parsing.")
         
-        # Display signals with parsed dates
-        if 'parsed_date' in signals_df.columns:
-            st.header("📋 Trading Signals (with GMT+3 timestamps)")
-            
-            display_df = signals_df.copy()
-            display_df['parsed_date_display'] = display_df['parsed_date'].dt.strftime('%Y-%m-%d %H:%M GMT+3')
-            
-            st.dataframe(display_df[['date', 'time', 'parsed_date_display', 'direction', 
-                                    'entry', 'stop_loss', 'take_profit', 'size_lots', 'risk_percent']], 
-                        use_container_width=True)
-        
-        # Backtest configuration
-        st.header("⚙️ Backtest Configuration")
-        
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            symbol = st.selectbox(
-                "Ticker Symbol",
-                ["GC=F", "XAUUSD=X", "GLD"],
-                help="Gold futures (GC=F), Gold spot (XAUUSD=X), or GLD ETF"
-            )
-        
-        with col2:
-            end_date = st.date_input(
-                "End Date for Analysis",
-                datetime.now().date()
-            )
-        
-        with col3:
-            max_days_held = st.number_input(
-                "Max Days to Hold Position",
-                min_value=1,
-                max_value=365,
-                value=30,
-                help="Close position after this many days if no exit triggered"
-            )
-        
-        # Calculate date range for data fetching
+        # If dates are parsed, show backtest configuration
         if 'parsed_date' in signals_df.columns and not signals_df['parsed_date'].isna().all():
+            st.header("⚙️ Backtest Configuration")
+            
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                symbol = st.selectbox(
+                    "Ticker Symbol",
+                    ["GC=F", "XAUUSD=X", "GLD"],
+                    help="Gold futures (GC=F), Gold spot (XAUUSD=X), or GLD ETF"
+                )
+            
+            with col2:
+                end_date = st.date_input(
+                    "End Date for Analysis",
+                    datetime.now().date()
+                )
+            
+            with col3:
+                max_days_held = st.number_input(
+                    "Max Days to Hold Position",
+                    min_value=1,
+                    max_value=365,
+                    value=30,
+                    help="Close position after this many days if no exit triggered"
+                )
+            
+            # Calculate date range for data fetching
             start_date = signals_df['parsed_date'].min().date() - timedelta(days=30)
             
             # Fetch price data button
@@ -850,10 +942,17 @@ st.markdown("---")
 st.markdown("""
 **Note:** 
 1. All times are assumed to be GMT+3 (Middle East Time)
-2. Signals without time specified default to 23:59 GMT+3
+2. Signals without time specified must be filled manually before proceeding
 3. Positions close when: Stop Loss/Take Profit hit, Max Days Held reached, or end of data
 4. No slippage, commissions, or other trading costs are included
 """)
+
+# Add reset button in sidebar
+st.sidebar.markdown("---")
+if st.sidebar.button("🔄 Reset All Data"):
+    for key in list(st.session_state.keys()):
+        del st.session_state[key]
+    st.rerun()
 
 # Add some CSS for better styling
 st.markdown("""
