@@ -35,6 +35,8 @@ if 'signals_df' not in st.session_state:
     st.session_state.signals_df = None
 if 'filled_times' not in st.session_state:
     st.session_state.filled_times = {}
+if 'dates_parsed' not in st.session_state:
+    st.session_state.dates_parsed = False
 
 # Function to load sample data
 def load_sample_data():
@@ -75,12 +77,14 @@ if uploaded_file is not None:
     try:
         signals_data = json.load(uploaded_file)
         st.session_state.signals_data = signals_data
+        st.session_state.dates_parsed = False  # Reset date parsing
         st.sidebar.success(f"✅ Loaded {len(signals_data.get('signals', []))} signals")
     except Exception as e:
         st.sidebar.error(f"Error loading file: {e}")
 else:
     if st.sidebar.button("Load Sample Data"):
         st.session_state.signals_data = load_sample_data()
+        st.session_state.dates_parsed = False  # Reset date parsing
         st.sidebar.success(f"✅ Loaded {len(st.session_state.signals_data.get('signals', []))} sample signals")
 
 # Function to parse date strings with GMT+3 timezone
@@ -92,9 +96,6 @@ def parse_signal_date(date_str, time_str=None, year=None):
             current_year = datetime.now().year
         else:
             current_year = year
-        
-        # For debugging
-        # st.write(f"Parsing: date_str='{date_str}', time_str='{time_str}', year={current_year}")
         
         # Remove any emojis or special characters from date string
         date_str_clean = date_str.strip()
@@ -413,7 +414,7 @@ if st.session_state.signals_data:
         st.session_state.signals_df = signals_df
         
         # Check for missing times
-        missing_times = signals_df[signals_df['time'].isna() | (signals_df['time'] == '')]
+        missing_times = signals_df[signals_df['time'].isna() | (signals_df['time'] == '') | (signals_df['time'].isnull())]
         
         # Display signals
         st.header("📋 Trading Signals")
@@ -506,6 +507,7 @@ if st.session_state.signals_data:
                                 signals_df.at[idx, 'time'] = time_value
                         
                         st.session_state.signals_df = signals_df
+                        st.session_state.dates_parsed = False  # Reset date parsing
                         st.rerun()
             
             # Show current status
@@ -537,58 +539,74 @@ if st.session_state.signals_data:
                                 'stop_loss', 'take_profit', 'size_lots', 'risk_percent']], 
                     use_container_width=True)
         
-        # Only proceed with date parsing if all times are filled or we have original times
-        if missing_times.empty or len(st.session_state.filled_times) == len(missing_times):
-            st.header("📅 Date Parsing Configuration")
+        # Date parsing section - always show this regardless of missing times
+        st.header("📅 Date Parsing Configuration")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Let user specify the year if needed
+            year_option = st.radio("Year for signals:", 
+                                  ["Current Year", "Specify Year"])
             
-            col1, col2 = st.columns(2)
+            if year_option == "Specify Year":
+                signal_year = st.number_input("Year for all signals", 
+                                            min_value=2000, 
+                                            max_value=datetime.now().year, 
+                                            value=datetime.now().year)
+            else:
+                signal_year = datetime.now().year
+        
+        with col2:
+            # Check if we can parse dates (all times must be filled or have original times)
+            can_parse_dates = missing_times.empty or len(st.session_state.filled_times) == len(missing_times)
             
-            with col1:
-                # Let user specify the year if needed
-                year_option = st.radio("Year for signals:", 
-                                      ["Current Year", "Specify Year"])
-                
-                if year_option == "Specify Year":
-                    signal_year = st.number_input("Year for all signals", 
-                                                min_value=2000, 
-                                                max_value=datetime.now().year, 
-                                                value=datetime.now().year)
-                else:
-                    signal_year = datetime.now().year
-            
-            with col2:
+            if can_parse_dates:
                 # Parse dates button
                 parse_dates = st.button("🔍 Parse Dates with GMT+3")
-            
-            if parse_dates:
-                with st.spinner("Parsing dates with GMT+3 timezone..."):
-                    parsed_dates = []
-                    errors = []
-                    
-                    for idx, row in signals_df.iterrows():
-                        parsed_date, error = parse_signal_date(row['date'], row['time'], signal_year)
+                
+                if parse_dates:
+                    with st.spinner("Parsing dates with GMT+3 timezone..."):
+                        parsed_dates = []
+                        errors = []
                         
-                        if error:
-                            errors.append(f"Signal {idx}: {error}")
+                        for idx, row in signals_df.iterrows():
+                            parsed_date, error = parse_signal_date(row['date'], row['time'], signal_year)
+                            
+                            if error:
+                                errors.append(f"Signal {idx}: {error}")
+                            
+                            parsed_dates.append(parsed_date)
                         
-                        parsed_dates.append(parsed_date)
-                    
-                    signals_df['parsed_date'] = parsed_dates
-                    st.session_state.signals_df = signals_df
-                    
-                    if errors:
-                        with st.expander("❌ Date Parsing Errors"):
-                            for error in errors:
-                                st.error(error)
-                    else:
-                        st.success("✅ All dates parsed successfully!")
-                        st.rerun()
-        else:
-            st.info("👆 Please fill all missing times above before proceeding to date parsing.")
+                        signals_df['parsed_date'] = parsed_dates
+                        st.session_state.signals_df = signals_df
+                        st.session_state.dates_parsed = True
+                        
+                        if errors:
+                            with st.expander("❌ Date Parsing Errors"):
+                                for error in errors:
+                                    st.error(error)
+                            st.session_state.dates_parsed = False
+                        else:
+                            st.success("✅ All dates parsed successfully!")
+                            st.rerun()
+            else:
+                st.warning("Cannot parse dates until all missing times are filled.")
         
-        # If dates are parsed, show backtest configuration
-        if 'parsed_date' in signals_df.columns and not signals_df['parsed_date'].isna().all():
+        # If dates are parsed OR we've already parsed them, show backtest configuration
+        if ('parsed_date' in signals_df.columns and not signals_df['parsed_date'].isna().all()) or st.session_state.dates_parsed:
+            if 'parsed_date' not in signals_df.columns and st.session_state.dates_parsed:
+                # Reload from session state
+                signals_df = st.session_state.signals_df
+            
             st.header("⚙️ Backtest Configuration")
+            
+            # Display parsed dates
+            st.subheader("Parsed Dates (GMT+3)")
+            parsed_display_df = signals_df.copy()
+            parsed_display_df['parsed_date_display'] = parsed_display_df['parsed_date'].dt.strftime('%Y-%m-%d %H:%M GMT+3')
+            st.dataframe(parsed_display_df[['date', 'time', 'parsed_date_display', 'entry']], 
+                        use_container_width=True)
             
             col1, col2, col3 = st.columns(3)
             
@@ -617,8 +635,21 @@ if st.session_state.signals_data:
             # Calculate date range for data fetching
             start_date = signals_df['parsed_date'].min().date() - timedelta(days=30)
             
-            # Fetch price data button
-            if st.button("🚀 Fetch Price Data and Run Backtest"):
+            # Fetch price data button - ALWAYS SHOW THIS
+            st.markdown("---")
+            st.subheader("🚀 Run Backtest")
+            
+            # Display backtest settings summary
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Symbol", symbol)
+            with col2:
+                st.metric("Date Range", f"{start_date} to {end_date}")
+            with col3:
+                st.metric("Max Days Held", max_days_held)
+            
+            # The main backtest button
+            if st.button("🚀 **Fetch Price Data and Run Backtest**", type="primary", use_container_width=True):
                 with st.spinner("Fetching historical data..."):
                     # Fetch price data
                     price_data = fetch_price_data(
@@ -629,6 +660,9 @@ if st.session_state.signals_data:
                     
                     if price_data is not None:
                         st.session_state.price_data = price_data
+                        
+                        # Display price data info
+                        st.success(f"✅ Fetched {len(price_data)} price records from {price_data['date'].min().date()} to {price_data['date'].max().date()}")
                         
                         # Run backtest
                         with st.spinner("Running backtest..."):
@@ -972,6 +1006,14 @@ st.markdown("""
         padding: 15px;
         border-radius: 5px;
         margin: 10px 0;
+    }
+    /* Make the main backtest button more prominent */
+    div[data-testid="stButton"] button[kind="primary"] {
+        background-color: #ff4b4b;
+        color: white;
+        font-weight: bold;
+        padding: 15px;
+        font-size: 18px;
     }
 </style>
 """, unsafe_allow_html=True)
